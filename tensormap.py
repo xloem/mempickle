@@ -1,11 +1,13 @@
+#!/usr/bin/env python3
+
 import torch, numpy as np
 import pickle
 import struct
 import mmap
 
-gptj_24G = '/media/3/huggingface/transformers/026f12960ffab80e6f4f983cd8672c6f4579e3a12d469f0cad87973e86376f78.45ab80c413af010231b34f81ca5a6a2fe0739bbe17b4672a5110f70bb75d2555'
-gpt2_1_5G = '/media/3/huggingface/transformers/6249eef5c8c1fcfccf9f36fc2e59301b109ac4036d8ebbee9c2b7f7e47f440bd.2538e2565f9e439a3668b981faf959c8b490b36dd631f3c4cd992519b2dd36f1'
-gpt2_0_5G = '/home/ubuntu/.cache/huggingface/transformers/752929ace039baa8ef70fe21cdf9ab9445773d20e733cf693d667982e210837e.323c769945a351daa25546176f8208b3004b6f563438a7603e7932bae9025925'
+#gptj_24G = '/media/3/huggingface/transformers/026f12960ffab80e6f4f983cd8672c6f4579e3a12d469f0cad87973e86376f78.45ab80c413af010231b34f81ca5a6a2fe0739bbe17b4672a5110f70bb75d2555'
+#gpt2_1_5G = '/media/3/huggingface/transformers/6249eef5c8c1fcfccf9f36fc2e59301b109ac4036d8ebbee9c2b7f7e47f440bd.2538e2565f9e439a3668b981faf959c8b490b36dd631f3c4cd992519b2dd36f1'
+#gpt2_0_5G = '/home/ubuntu/.cache/huggingface/transformers/752929ace039baa8ef70fe21cdf9ab9445773d20e733cf693d667982e210837e.323c769945a351daa25546176f8208b3004b6f563438a7603e7932bae9025925'
 
 class TensorMap:
     def __init__(self, filename):
@@ -54,11 +56,36 @@ class TensorMap:
             self.file.seek(pos + bytelen)
         return data
 
-tensormap = TensorMap('test_output.tensormap')
+#tensormap = TensorMap('test_output.tensormap')
+#
+#if not tensormap.exists():
+#    data = torch.load(gpt2_0_5G)
+#    tensormap.write(data)
+#
+#data = tensormap.read()
+#print(data.keys())
 
-if not tensormap.exists():
-    data = torch.load(gpt2_0_5G)
-    tensormap.write(data)
+if __name__ == '__main__':
+    import argparse, sys
+    parser = argparse.ArgumentParser(description='convert a .pt file to a .tensormap file')
+    parser.add_argument('input_filename', help='.pt file to convert')
+    parser.add_argument('-o', '--output_filename', required=False, help='.tensormap file to output to')
+    parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
+    args = parser.parse_args()
 
-data = tensormap.read()
-print(data.keys())
+    if not args.output_filename:
+        basename = args.input_filename
+        if basename.endswith('.pt'):
+            basename = basename[:-len('.pt')]
+        args.output_filename = basename + '.tensormap'
+
+    tensormap = TensorMap(args.output_filename)
+
+    assert not tensormap.exists() or args.force
+
+    print(f'Loading {args.input_filename} ...', file=sys.stderr)
+    torch_data = torch.load(args.input_filename)
+
+    print(f'Writing {args.output_filename} ...', file=sys.stderr)
+    tensormap.write(torch_data)
+    
