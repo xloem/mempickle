@@ -26,3 +26,5 @@ the load_tensor() local function is on line 841 for me.
         parameters are just a dictionary of tensors, as i understand.  yeah, an ordered dictionary.
             torch.frombuffer(buffer, dtype=dtype, count=num_items, offset=bytes_to_skip, requires_grad=TrueOrFalse) <- produces a tensor view of something that implements the buffer protocol
                
+
+	note: mmap offsets must be page aligned, which usually means 4k
