@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import transformers, torch, numpy as np
+import os
 import pickle
 import struct
 import mmap
@@ -25,7 +26,6 @@ class PyTorchMap:
     pagesize = mmap.PAGESIZE
 
     def exists(self):
-        import os
         return os.path.exists(self.filename)
 
     def write(self, data):
@@ -69,14 +69,17 @@ class PyTorchMap:
 
 if __name__ == '__main__':
     import argparse, sys
-    parser = argparse.ArgumentParser(description='convert a .pt file to a .ptmap file')
-    parser.add_argument('input_filename', help='.pt file to convert')
+    parser = argparse.ArgumentParser(description='convert a .pt file or model to a .ptmap file')
+    parser.add_argument('input_path', help='.pt file or model dir to convert')
     parser.add_argument('-o', '--output_filename', required=False, help='.ptmap file to output to')
     parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
     args = parser.parse_args()
 
+    if os.path.isdir(args.input_path):
+        args.input_path = os.path.join(args.input_path, transformers.file_utils.WEIGHTS_NAME)
+
     if not args.output_filename:
-        basename = args.input_filename
+        basename = args.input_path
         if basename.endswith('.pt'):
             basename = basename[:-len('.pt')]
         args.output_filename = basename + '.ptmap'
@@ -85,8 +88,8 @@ if __name__ == '__main__':
 
     assert not tensormap.exists() or args.force
 
-    print(f'Loading {args.input_filename} ...', file=sys.stderr)
-    torch_data = torch.load(args.input_filename)
+    print(f'Loading {args.input_path} ...', file=sys.stderr)
+    torch_data = torch.load(args.input_path)
 
     print(f'Writing {args.output_filename} ...', file=sys.stderr)
     tensormap.write(torch_data)
