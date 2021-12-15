@@ -28,12 +28,18 @@ class PyTorchMap:
     def exists(self):
         return os.path.exists(self.filename)
 
-    def write(self, data):
+    def write(self, data, verbose = True):
         self.pagesize = mmap.PAGESIZE
         with open(self.filename, 'wb') as output:
             header = pickle.dumps((self.version, self.pagesize, len(data)))
             output.write(header)
-            for name, tensor in data.items():
+            enumerated_items = enumerate(data.items())
+            if verbose:
+                import tqdm
+                enumerated_items = tqdm.tqdm(enumerated_items, total = len(data))
+            for idx, (name, tensor) in enumerated_items:
+                if verbose:
+                    enumerated_items.set_description(name)
                 flat_tensor = tensor.flatten()
                 # numpy is only used because it seemed easier to quickly implement when writing this
                 numpy = flat_tensor.numpy()
