@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
 
-import torch, numpy as np
+import transformers, torch, numpy as np
 import pickle
 import struct
 import mmap
 
-#gptj_24G = '/media/3/huggingface/transformers/026f12960ffab80e6f4f983cd8672c6f4579e3a12d469f0cad87973e86376f78.45ab80c413af010231b34f81ca5a6a2fe0739bbe17b4672a5110f70bb75d2555'
-#gpt2_1_5G = '/media/3/huggingface/transformers/6249eef5c8c1fcfccf9f36fc2e59301b109ac4036d8ebbee9c2b7f7e47f440bd.2538e2565f9e439a3668b981faf959c8b490b36dd631f3c4cd992519b2dd36f1'
-#gpt2_0_5G = '/home/ubuntu/.cache/huggingface/transformers/752929ace039baa8ef70fe21cdf9ab9445773d20e733cf693d667982e210837e.323c769945a351daa25546176f8208b3004b6f563438a7603e7932bae9025925'
+PTMAP_WEIGHTS_NAME = transformers.file_utils.WEIGHTS_NAME.replace('.bin', '.ptmap')
 
-class TensorMap:
-    def __init__(self, filename):
+class PyTorchMap:
+    def __init__(self, filename = PTMAP_WEIGHTS_NAME):
         self.filename = filename
         self.version = 1
+
     @staticmethod
-    def endian():
-        return ['big', 'little'][np.array(1).tobytes()[0]]
+    def from_model(name_or_path, revision = None, mirror = None, cache_dir = None, force_download = False, proxies = None, resume_download = False, local_files_only = False, use_auth_token = None):
+        if os.path.isdir(name_or_path):
+            filename = os.path.join(name_or_path, PTMAP_WEIGHTS_NAME)
+        else:
+            filename = transformers.file_utils.hf_bucket_url(name_or_path, filename = PTMAP_WEIGHTS_NAME, revision = revision, mirror = mirror)
+            filename = transformers.file_utils.cached_path(filename, cache_dir = cache_dir, force_download = force_download, proxies = proxies, resume_download = resume_download, local_files_only = local_files_only, use_auth_token = use_auth_token)
+        return PyTorchMap(filename)
+
+    endian = ['big', 'little'][np.array(1).tobytes()[0]]
+    pagesize = mmap.PAGESIZE
+
     def exists(self):
         import os
         return os.path.exists(self.filename)
+
     def write(self, data):
         self.pagesize = mmap.PAGESIZE
         with open(self.filename, 'wb') as output:
@@ -26,6 +35,7 @@ class TensorMap:
             output.write(header)
             for name, tensor in data.items():
                 flat_tensor = tensor.flatten()
+                # numpy is only used because it seemed easier to quickly implement when writing this
                 numpy = flat_tensor.numpy()
                 numpy_dtype = numpy.dtype
                 tensor_header = pickle.dumps((name, tensor.dtype, tuple(tensor.shape), numpy_dtype, len(numpy), tensor.requires_grad))
@@ -34,7 +44,8 @@ class TensorMap:
                 if pos % self.pagesize != 0:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
-    def read(self):
+
+    def read(self, writable = False):
         self.file = open(self.filename, 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         assert self.pagesize % mmap.PAGESIZE == 0
@@ -56,20 +67,11 @@ class TensorMap:
             self.file.seek(pos + bytelen)
         return data
 
-#tensormap = TensorMap('test_output.tensormap')
-#
-#if not tensormap.exists():
-#    data = torch.load(gpt2_0_5G)
-#    tensormap.write(data)
-#
-#data = tensormap.read()
-#print(data.keys())
-
 if __name__ == '__main__':
     import argparse, sys
-    parser = argparse.ArgumentParser(description='convert a .pt file to a .tensormap file')
+    parser = argparse.ArgumentParser(description='convert a .pt file to a .ptmap file')
     parser.add_argument('input_filename', help='.pt file to convert')
-    parser.add_argument('-o', '--output_filename', required=False, help='.tensormap file to output to')
+    parser.add_argument('-o', '--output_filename', required=False, help='.ptmap file to output to')
     parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
     args = parser.parse_args()
 
@@ -77,9 +79,9 @@ if __name__ == '__main__':
         basename = args.input_filename
         if basename.endswith('.pt'):
             basename = basename[:-len('.pt')]
-        args.output_filename = basename + '.tensormap'
+        args.output_filename = basename + '.ptmap'
 
-    tensormap = TensorMap(args.output_filename)
+    tensormap = PyTorchMap(args.output_filename)
 
     assert not tensormap.exists() or args.force
 
