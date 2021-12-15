@@ -1,0 +1,1 @@
+The relevant data can likely be mmapped simply by passing a buffer object alongside existing functions and reusing it where desired.
