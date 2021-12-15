@@ -36,7 +36,7 @@ class PyTorchMap:
             enumerated_items = enumerate(data.items())
             if verbose:
                 import tqdm
-                enumerated_items = tqdm.tqdm(enumerated_items, total = len(data))
+                enumerated_items = tqdm.tqdm(enumerated_items, total = len(data), leave = False)
             for idx, (name, tensor) in enumerated_items:
                 if verbose:
                     enumerated_items.set_description(name)
