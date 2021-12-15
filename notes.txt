@@ -1,1 +1,6 @@
 The relevant data can likely be mmapped simply by passing a buffer object alongside existing functions and reusing it where desired.
+
+- visit __setstate__ etc and construct data as directly backed by bytes or memoryview
+- use a buffer format that pickle preserves the bytes object from as read, this may be already the case or may require code mutation
+- unpickle file object that returns mmap'd data from read()
+
