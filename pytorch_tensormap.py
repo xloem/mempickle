@@ -67,6 +67,17 @@ class PyTorchMap:
             self.file.seek(pos + bytelen)
         return data
 
+def pipeline(task = None, model = None, *params, framework = None, use_auth_token = None, revision = None, model_kwargs = {}, **kwparams):
+    if 'state_dict' not in model_kwargs and framework in (None, 'pt'):
+        if task is None and model is not None:
+            task = transformers.pipelines.get_task(model, use_auth_token)
+        targeted_task, task_options = transformers.pipelines.check_task(task)
+        if model is None:
+            model = transformers.pipelines.get_default_model(targeted_task, framework, task_options)
+        model_kwargs['state_dict'] = PyTorchMap.from_model(model, revision = revision, use_auth_token = use_auth_token).read()
+    return transformers.pipeline(task, model, *params, framework = framework, use_auth_token = use_auth_token, revision = revision, model_kwargs = model_kwargs, **kwparams)
+    
+
 if __name__ == '__main__':
     import argparse, sys
     parser = argparse.ArgumentParser(description='convert a .pt file or model to a .ptmap file')
@@ -82,6 +93,8 @@ if __name__ == '__main__':
         basename = args.input_path
         if basename.endswith('.pt'):
             basename = basename[:-len('.pt')]
+        elif basename.endswith('.bin'):
+            basename = basename[:-len('.bin')]
         args.output_filename = basename + '.ptmap'
 
     tensormap = PyTorchMap(args.output_filename)
