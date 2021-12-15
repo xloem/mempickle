@@ -4,3 +4,4 @@ The relevant data can likely be mmapped simply by passing a buffer object alongs
 - use a buffer format that pickle preserves the bytes object from as read, this may be already the case or may require code mutation
 - unpickle file object that returns mmap'd data from read()
 
+could also use a different storage format if working on system with enough ram to convert
