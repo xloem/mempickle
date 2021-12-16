@@ -121,6 +121,7 @@ if __name__ == '__main__':
     parser.add_argument('input_path', help='.pt file or model dir to convert')
     parser.add_argument('-o', '--output_filename', required=False, help='.ptmap file to output to')
     parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
+    parser.add_argument('-q', '--quiet', '-s', '--silent', action='store_true', help='disable saving progress meter')
     args = parser.parse_args()
 
     if os.path.isdir(args.input_path):
@@ -138,9 +139,11 @@ if __name__ == '__main__':
 
     assert not tensormap.exists() or args.force
 
-    print(f'Loading {args.input_path} ...', file=sys.stderr)
+    if not args.quiet:
+        print(f'Loading {args.input_path} ...', file=sys.stderr)
     torch_data = torch.load(args.input_path)
 
-    print(f'Writing {args.output_filename} ...', file=sys.stderr)
-    tensormap.write(torch_data)
+    if not args.quiet:
+        print(f'Writing {args.output_filename} ...', file=sys.stderr)
+    tensormap.write(torch_data, verbose=not args.quiet)
     
