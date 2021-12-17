@@ -98,6 +98,7 @@ class Ctx:
         if self.offline is not None:
             transformers.file_utils._is_offline_mode = self.offline
         transformers.file_utils.WEIGHTS_NAME = PTMAP_WEIGHTS_NAME
+        
         PyTorchMap._cache = {}
         self._torch_load = torch.load
         def torch_load_wrapper(fn, *params, **kwparams):
@@ -110,6 +111,15 @@ class Ctx:
             except:
                 return self._torch_load(fn, *params, **kwparams)
         torch.load = torch_load_wrapper
+        
+        self._torch_save = torch.save
+        def torch_save_wrapper(obj, fn, *params, **kwparams):
+            if fn in PyTorchMap._cache or fn.endswith('.ptmap'):
+                PyTorchMap(fn).write(obj, verbose = self.read_kwparams.get('verbose', True)
+            else:
+                self._torch_save(obj, fn, *params, **kwparams)
+        torch.save = torch_save_wrapper
+
         self._pipeline = transformers.pipeline
         def pipeline_wrapper(*params, model_kwargs = None, **kwparams):
             if model_kwargs is None:
@@ -120,6 +130,7 @@ class Ctx:
 
     def __exit__(self, *params, **kwparams):
         transformers.pipeline= self._pipeline
+        torch.save = self._torch_save
         torch.load = self._torch_load
         transformers.file_utils.WEIGHTS_NAME = WEIGHTS_NAME
         transformers.file_utils._is_offline_mode = self._transformers_offline
