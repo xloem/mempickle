@@ -55,14 +55,17 @@ class PyTorchMap:
             pos = self.file.tell()
             if pos % self.pagesize != 0:
                 pos += self.pagesize - (pos % self.pagesize)
-            #buf = self.file.read(numpy_dtype.itemsize * numpy_len)
+
             bytelen = numpy_dtype.itemsize * numpy_len
             buf = mmap.mmap(self.file.fileno(), bytelen, access = mmap.ACCESS_DEFAULT if writeable else mmap.ACCESS_READ, offset = pos)
 
-            numpy = np.frombuffer(buf, numpy_dtype, count=numpy_len, offset=0)
-            tensor = torch.from_numpy(numpy)
+            try:
+                tensor = torch.frombuffer(buf, dtype = tensor_dtype, count = numpy_len, offset = 0, requires_grad = requires_grad)
+            except AttributeError:
+                numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = 0)
+                tensor = torch.from_numpy(numpy)
+                tensor.requires_grad = requires_grad
             tensor = tensor.unflatten(0, tensor_shape)
-            tensor.requires_grad = requires_grad
             data['transformer.' + name] = tensor
             self.file.seek(pos + bytelen)
         return data
@@ -98,7 +101,7 @@ class Ctx:
                     PyTorchMap._cache[fn] = result
                 return result
             except:
-                return _torch_load(fn, *params, **kwparams)
+                return self._torch_load(fn, *params, **kwparams)
         torch.load = torch_load_wrapper
         self._pipeline = transformers.pipeline
         def pipeline_wrapper(*params, model_kwargs = None, **kwparams):
