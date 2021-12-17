@@ -17,8 +17,8 @@ class PyTorchMap:
     endian = ['big', 'little'][np.array(1).tobytes()[0]]
     pagesize = mmap.PAGESIZE
 
-    def write(self, data, verbose = True):
-        self.pagesize = mmap.PAGESIZE
+    def write(self, data, verbose = True, pagesize = mmap.PAGESIZE):
+        self.pagesize = pagesize
         with open(self.filename, 'wb') as output:
             header = pickle.dumps((self.version, self.pagesize, len(data)))
             output.write(header)
@@ -40,7 +40,7 @@ class PyTorchMap:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
 
-    def read(self, writeable = False, verbose = True):
+    def read(self, writeable = False, verbose = True, multi = False):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         assert self.pagesize % mmap.PAGESIZE == 0
@@ -49,6 +49,9 @@ class PyTorchMap:
         if verbose:
             import tqdm
             enumeration = tqdm.tqdm(enumeration, total = data_len, leave = False)
+        access = mmap.ACCESS_DEFAULT if writeable else mmap.ACCESS_READ
+        if not multi:
+            buf = mmap.mmap(self.file.fileno(), 0, access = access, offset = 0)
         for idx in enumeration:
             name, tensor_dtype, tensor_shape, numpy_dtype, numpy_len, requires_grad = pickle.load(self.file)
             enumeration.set_description(name)
@@ -57,12 +60,16 @@ class PyTorchMap:
                 pos += self.pagesize - (pos % self.pagesize)
 
             bytelen = numpy_dtype.itemsize * numpy_len
-            buf = mmap.mmap(self.file.fileno(), bytelen, access = mmap.ACCESS_DEFAULT if writeable else mmap.ACCESS_READ, offset = pos)
+            if multi:
+                buf = mmap.mmap(self.file.fileno(), bytelen, access = access, offset = pos)
+                tensor_offset = 0
+            else:
+                tensor_offset = pos
 
             try:
-                tensor = torch.frombuffer(buf, dtype = tensor_dtype, count = numpy_len, offset = 0, requires_grad = requires_grad)
+                tensor = torch.frombuffer(buf, dtype = tensor_dtype, count = numpy_len, offset = tensor_offset, requires_grad = requires_grad)
             except AttributeError:
-                numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = 0)
+                numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = tensor_offset)
                 tensor = torch.from_numpy(numpy)
                 tensor.requires_grad = requires_grad
             tensor = tensor.unflatten(0, tensor_shape)
