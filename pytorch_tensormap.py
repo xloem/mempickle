@@ -6,6 +6,8 @@ import pickle
 import struct
 import mmap
 
+import patch_pytorch
+
 WEIGHTS_NAME = transformers.file_utils.WEIGHTS_NAME
 PTMAP_WEIGHTS_NAME = WEIGHTS_NAME.replace('.bin', '.ptmap')
 
@@ -40,7 +42,7 @@ class PyTorchMap:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
 
-    def read(self, writeable = False, verbose = True, multi = False):
+    def read(self, writeable = False, verbose = True, multi = False, add_prefix = ''):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         assert self.pagesize % mmap.PAGESIZE == 0
@@ -72,8 +74,11 @@ class PyTorchMap:
                 numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = tensor_offset)
                 tensor = torch.from_numpy(numpy)
                 tensor.requires_grad = requires_grad
-            tensor = tensor.unflatten(0, tensor_shape)
-            data['transformer.' + name] = tensor
+            if not len(tensor_shape) and numpy_len == 1:
+                tensor = tensor[0]
+            else:
+                tensor = tensor.unflatten(0, tensor_shape)
+            data[add_prefix + name] = tensor
             self.file.seek(pos + bytelen)
         return data
 
@@ -120,16 +125,21 @@ class Ctx:
                 self._torch_save(obj, fn, *params, **kwparams)
         torch.save = torch_save_wrapper
 
-        self._pipeline = transformers.pipeline
+        self._transformers_pipeline = transformers.pipeline
         def pipeline_wrapper(*params, model_kwargs = None, **kwparams):
             if model_kwargs is None:
                 model_kwargs = {}
             model_kwargs['low_cpu_mem_usage'] = True
-            return self._pipeline(*params, model_kwargs = model_kwargs, **kwparams)
+            return self._transformers_pipeline(*params, model_kwargs = model_kwargs, **kwparams)
         transformers.pipeline = pipeline_wrapper
+        def Linear_wrapper(in_features, out_features, bias = True, device = None, dtype = None):
+            return torch.nn.LazyLinear(out_features, bias, device, dtype)
+        self._torch_nn_linear = torch.nn.Linear
+        torch.nn.Linear = Linear_wrapper
 
     def __exit__(self, *params, **kwparams):
-        transformers.pipeline= self._pipeline
+        torch.nn.Linear = self._torch_nn_linear
+        transformers.pipeline= self._transformers_pipeline
         torch.save = self._torch_save
         torch.load = self._torch_load
         transformers.file_utils.WEIGHTS_NAME = WEIGHTS_NAME
