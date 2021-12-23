@@ -74,7 +74,10 @@ class PyTorchMap:
                 numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = tensor_offset)
                 tensor = torch.from_numpy(numpy)
                 tensor.requires_grad = requires_grad
-            tensor = tensor.unflatten(0, tensor_shape)
+            if not len(tensor_shape) and numpy_len == 1:
+                tensor = tensor[0]
+            else:
+                tensor = tensor.unflatten(0, tensor_shape)
             data['transformer.' + name] = tensor
             self.file.seek(pos + bytelen)
         return data
