@@ -6,6 +6,8 @@ import pickle
 import struct
 import mmap
 
+import patch_pytorch
+
 WEIGHTS_NAME = transformers.file_utils.WEIGHTS_NAME
 PTMAP_WEIGHTS_NAME = WEIGHTS_NAME.replace('.bin', '.ptmap')
 
