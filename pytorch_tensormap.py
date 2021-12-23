@@ -4,6 +4,7 @@ import transformers, torch, numpy as np
 import os
 import pickle
 import struct
+import threading
 import mmap
 
 import patch_pytorch
@@ -42,7 +43,7 @@ class PyTorchMap:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
 
-    def read(self, writeable = False, verbose = True, multi = False, add_prefix = ''):
+    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         assert self.pagesize % mmap.PAGESIZE == 0
@@ -80,6 +81,10 @@ class PyTorchMap:
                 tensor = tensor.unflatten(0, tensor_shape)
             data[add_prefix + name] = tensor
             self.file.seek(pos + bytelen)
+
+        #import pdb; pdb.set_trace()
+        if track_forward_calls:
+            self.track_forward_calls(data)
         return data
 
     def exists(self):
@@ -93,6 +98,96 @@ class PyTorchMap:
             filename = transformers.file_utils.hf_bucket_url(name_or_path, filename = PTMAP_WEIGHTS_NAME, revision = revision, mirror = mirror)
             filename = transformers.file_utils.cached_path(filename, cache_dir = cache_dir, force_download = force_download, proxies = proxies, resume_download = resume_download, local_files_only = local_files_only, use_auth_token = use_auth_token)
         return PyTorchMap(filename)
+
+    def track_forward_calls(self, state_dict):
+        tensor_ct = len(state_dict)
+        key_tensor_by_stored_idx = [*state_dict.items()]
+        stored_idx_key_tensor_by_data = {
+            tensor.data_ptr(): (idx, key, tensor)
+            for idx, (key, tensor)
+            in enumerate(key_tensor_by_stored_idx)
+        }
+        next_stored_idx = 0
+        out_of_order = False
+        order_matched = False
+        module_tidx_key_tensor_by_read_idx = [] # add time to this.  make it a namedtuple.
+        def track_forward(module, inputs):
+            for tidx, (pname, parameter) in enumerate(module._parameters.items()):
+                if parameter is None:
+                    continue
+                stored_idx_key_tensor = stored_idx_key_tensor_by_data.get(parameter.data_ptr())
+                if stored_idx_key_tensor is not None:
+                    stored_idx, key, tensor = stored_idx_key_tensor
+                    print(key, tensor.shape, module.__class__.__name__, pname)
+
+                    # set out_of_order flag
+                    nonlocal out_of_order, next_stored_idx
+                    if not out_of_order:
+                        if stored_idx != next_stored_idx:
+                            out_of_order = True
+                        else:
+                            next_stored_idx += 1
+
+                    # store read order
+                    if tensor is not module_tidx_key_tensor_by_read_idx[0][-1]:
+                        module_tidx_key_tensor_by_read_idx.append((module, tidx, key, tensor))
+                    else:
+                        #import pdb; pdb.set_trace()
+                        finished_tracking_calls()
+                        break
+
+        tracking_handle = torch.nn.modules.module.register_module_forward_pre_hook(track_forward)
+
+        def finished_tracking_calls():
+            tracking_handle.remove()
+            if out_of_order:
+                import warnings
+                state_dict.clear()
+                state_dict.update({
+                    key : tensor
+                    for module, tidx, key, tensor in module_tidx_key_tensor_by_read_idx
+                })
+                warnings.warn(f'tensors in {self.filename} are ordered differently from use.')
+                warnings.warn(f'they have been sorted in the read state_dict and can be resaved.')
+                order_filename = self.filename + '.order.json'
+                with open(order_filename, 'wt') as order_file:
+                    json.dump([*state_dict.keys()], order_file)
+                warnings.warn(f'runtime key order has been written to {order_filename}')
+            for (
+                read_idx,
+                (
+                    (prev_module, prev_tidx, prev_key, prev_tensor),
+                    (next_module, next_tidx, next_key, next_tensor)
+                )
+            ) in enumerate(zip(
+                module_tidx_key_tensor_by_read_idx[:-1],
+                module_tidx_key_tensor_by_read_idx[1:]
+            )):
+                preload_next_tensor(read_idx, prev_module, next_tensor)
+
+        preload_lock = threading.Lock()
+        preload_lock.acquire()
+        next_to_preload = concurrent.future.Future()
+        def preload_loop():
+            nonlocal next_to_preload
+            for tensor in range(len(state_dict)):
+                next_tensor = next_to_preload.result().flatten()
+                next_to_preload = concurrent.future.Future()
+                for idx in range(0, len(next_tensor), mmap.PAGESIZE):
+                    next_tensor[idx]
+
+        def preload_next_tensor(read_idx, module, next_tensor):
+            # the tensors are smaller than ram individually; it is fine to preload them together
+            def prepare_next_tensor(module, input):
+                if not next_to_preload.done():
+                    next_to_preload.set_result(next_tensor)
+                if not self.preload_thread.is_alive():
+                    self.preload_thread.start()
+
+            module.register_forward_pre_hook(prepare_next_tensor)
+            
+
+        self.preload_thread = threading.Thread(target=preload_loop)
 
 class Ctx:
     def __init__(self, offline : bool = None, **read_kwparams):
