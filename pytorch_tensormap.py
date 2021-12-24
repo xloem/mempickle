@@ -20,11 +20,14 @@ class PyTorchMap:
     def __init__(self, filename = PTMAP_WEIGHTS_NAME):
         self.filename = filename
         self.version = 1
+        self._preload_loops = {}
 
     endian = ['big', 'little'][np.array(1).tobytes()[0]]
     pagesize = mmap.PAGESIZE
 
-    def write(self, data, verbose = True, pagesize = mmap.PAGESIZE):
+    def write(self, data, verbose = True, pagesize = mmap.PAGESIZE, enforce_aligned = False, remove_prefix = ''):
+        if enforce_aligned:
+            assert pagesize % mmap.PAGESIZE == 0
         self.pagesize = pagesize
         with open(self.filename, 'wb') as output:
             header = pickle.dumps((self.version, self.pagesize, len(data)))
@@ -34,6 +37,8 @@ class PyTorchMap:
                 import tqdm
                 enumerated_items = tqdm.tqdm(enumerated_items, total = len(data), leave = False)
             for idx, (name, tensor) in enumerated_items:
+                if name.startswith(remove_prefix):
+                    name = name[len(remove_prefix):]
                 if verbose:
                     enumerated_items.set_description(name)
                 flat_tensor = tensor.flatten()
@@ -47,10 +52,11 @@ class PyTorchMap:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
 
-    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True):
+    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True, enforce_aligned = False, retain_unused = False):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
-        assert self.pagesize % mmap.PAGESIZE == 0
+        if multi or enforce_aligned:
+            assert self.pagesize % mmap.PAGESIZE == 0
         data = {}
         total_tensor_elements = 0
         enumeration = range(data_len)
@@ -76,7 +82,8 @@ class PyTorchMap:
                 tensor_offset = pos
 
             try:
-                tensor = torch.frombuffer(buf, dtype = tensor_dtype, count = numpy_len, offset = tensor_offset, requires_grad = requires_grad)
+                tensor = torch.frombuffer( # readonly warning; use read(writeable = True) to write
+                        buf, dtype = tensor_dtype, count = numpy_len, offset = tensor_offset, requires_grad = requires_grad)
             except AttributeError:
                 numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = tensor_offset)
                 tensor = torch.from_numpy(numpy)
@@ -95,9 +102,12 @@ class PyTorchMap:
                     order = json.load(order_file)
                     new_data = {}
                     for key in order:
-                        new_data[add_prefix + key] = data[add_prefix + key]
-                        del data[add_prefix + key]
-                    new_data.update(data)
+                        if not key.startswith(add_prefix):
+                            key = add_prefix + key
+                        new_data[key] = data[key]
+                        del data[key]
+                    if retain_unused:
+                        new_data.update(data)
                     data = new_data
                     warnings.warn(
                         f'Data presented reordered from file {order_filename}.\n'
@@ -106,7 +116,7 @@ class PyTorchMap:
             except:
                 pass
         if track_forward_calls:
-            self.track_forward_calls(data, total_tensor_elements, add_prefix = add_prefix, verbose = verbose, preload = tracking_preloads_tensors)
+            self.track_forward_calls(data, total_tensor_elements, add_prefix = add_prefix, verbose = verbose, preload = tracking_preloads_tensors, retain_unused = retain_unused)
         return data
 
     def exists(self):
@@ -121,27 +131,41 @@ class PyTorchMap:
             filename = transformers.file_utils.cached_path(filename, cache_dir = cache_dir, force_download = force_download, proxies = proxies, resume_download = resume_download, local_files_only = local_files_only, use_auth_token = use_auth_token)
         return PyTorchMap(filename)
 
-    def track_forward_calls(self, state_dict, total_tensor_elements, add_prefix, verbose, preload, debug = False):
+    def cancel_preload_loop(self, state_dict):
+        queue = self._preload_loops.get(id(state_dict), None)
+        if queue is not None:
+            queue.put(None)
+
+    def track_forward_calls(self, state_dict, total_tensor_elements, add_prefix, verbose, preload, retain_unused, debug = False):
 
         out_of_order = False
+
+        #if verbose:
+        #    import tqdm
+        #    verbose = tqdm.tqdm(total = total_tensor_elements, leave = False)
+        #    processed
 
         if preload:
             preload_queue = queue.Queue(1)
             def preload_loop():
+                self._preload_loops[id(state_dict)] = preload_queue
                 for tensor in range(len(state_dict)):
                     if debug:
                         print(f'thread waiting')# for {self._next_to_preload}')
                     next_tensors = preload_queue.get()
+                    if next_tensors is None:
+                        break
                     if debug:
                         print(f'thread got')# {self._next_to_preload}')
                     for next_tensor in next_tensors:
                         next_tensor = next_tensor.flatten()
                         for idx in range(0, len(next_tensor), mmap.PAGESIZE):
                             next_tensor[idx]
+                del self._preload_loops[id(state_dict)]
 
-            assert not hasattr(self, 'preload_thread')
-            self.preload_thread = threading.Thread(target=preload_loop)
-            self.preload_thread.start()
+
+            preload_thread = threading.Thread(target=preload_loop)
+            preload_thread.start()
 
         tensor_ct = len(state_dict)
         key_tensor_by_stored_idx = [*state_dict.items()]
@@ -154,18 +178,24 @@ class PyTorchMap:
         order_matched = False
         module_tidx_key_tensor_by_read_idx = [] # add time to this.  make it a namedtuple.
         def track_forward(module, inputs):
-            for tidx, (pname, parameter) in enumerate(module._parameters.items()):
+
+            parameter_items = [*module._parameters.items()]
+            parameter_items.sort(key = lambda item: item[0])
+            for tidx, (pname, parameter) in enumerate(parameter_items):
                 if parameter is None:
                     continue
                 stored_idx_key_tensor = stored_idx_key_tensor_by_data.get(parameter.data_ptr())
                 if stored_idx_key_tensor is not None:
                     stored_idx, key, tensor = stored_idx_key_tensor
-                    print(key, tensor.shape, module.__class__.__name__, pname)
+                    #print(key, tensor.shape, module.__class__.__name__, pname)
+                    # PROGRESS DATA WAS OUTPUT ABOVE LINE
+
+                    is_last = len(module_tidx_key_tensor_by_read_idx) > 0 and tensor is module_tidx_key_tensor_by_read_idx[0][-1]
 
                     # set out_of_order flag
                     nonlocal out_of_order, next_stored_idx
                     if not out_of_order:
-                        if stored_idx != next_stored_idx:
+                        if stored_idx != next_stored_idx and not is_last:
                             out_of_order = True
                     next_stored_idx = (stored_idx + 1) % len(key_tensor_by_stored_idx)
 
@@ -179,7 +209,7 @@ class PyTorchMap:
                                 print('main skipping due to last result not take')
 
                     # store read order
-                    if len(module_tidx_key_tensor_by_read_idx) == 0 or tensor is not module_tidx_key_tensor_by_read_idx[0][-1]:
+                    if not is_last:
                         module_tidx_key_tensor_by_read_idx.append((module, tidx, key, tensor))
                     else:
                         finished_tracking_calls()
@@ -192,12 +222,16 @@ class PyTorchMap:
             if out_of_order:
                 state_dict.clear()
                 state_dict.update({
-                    (key[len(add_prefix):] if key.startswith(add_prefix) else key) : tensor
+                    key[len(add_prefix):] if key.startswith(add_prefix) else key : tensor
                     for module, tidx, key, tensor in module_tidx_key_tensor_by_read_idx
                 })
                 order_filename = self.filename + '.order.json'
                 with open(order_filename, 'wt') as order_file:
                     json.dump([*state_dict.keys()], order_file)
+                if retain_unused:
+                    for key, tensor in key_tensor_by_stored_idx:
+                        if key not in state_dict:
+                            state_dict[key] = tensor
                 warnings.warn(
                     f'tensors in {self.filename} are ordered differently from use.\n'
                     f'they have been sorted in the read state_dict and can be resaved.\n'
@@ -233,6 +267,8 @@ class PyTorchMap:
         def register_module_next_tensor(read_idx, module, next_tensors):
             # the tensors were smaller than ram individually; it was fine to preload them together
             def prepare_next_tensor(module, input):
+                nonlocal preload_thread
+
                 if debug:
                      print('main2 setting result')
                 try:
@@ -241,9 +277,9 @@ class PyTorchMap:
                     if debug:
                         print('main2 skipping due to last result not take')
 
-                if not self.preload_thread.is_alive():
-                    self.preload_thread = threading.Thread(target=preload_loop)
-                    self.preload_thread.start()
+                if not preload_thread.is_alive():
+                    preload_thread = threading.Thread(target=preload_loop)
+                    preload_thread.start()
 
             module.register_forward_pre_hook(prepare_next_tensor)
 
