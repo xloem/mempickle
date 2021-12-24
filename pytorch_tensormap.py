@@ -35,7 +35,7 @@ class PyTorchMap:
             enumerated_items = enumerate(data.items())
             if verbose:
                 import tqdm
-                enumerated_items = tqdm.tqdm(enumerated_items, total = len(data), leave = False)
+                enumerated_items = tqdm.tqdm(enumerated_items, total = len(data), leave = False, unit = 'wt')
             for idx, (name, tensor) in enumerated_items:
                 if name.startswith(remove_prefix):
                     name = name[len(remove_prefix):]
@@ -58,23 +58,23 @@ class PyTorchMap:
         if multi or enforce_aligned:
             assert self.pagesize % mmap.PAGESIZE == 0
         data = {}
-        total_tensor_elements = 0
+        total_tensor_bytes = 0
         enumeration = range(data_len)
         if verbose:
             import tqdm
-            enumeration = tqdm.tqdm(enumeration, total = data_len, leave = False)
+            enumeration = tqdm.tqdm(enumeration, total = data_len, leave = False, unit = 'wt')
         access = mmap.ACCESS_DEFAULT if writeable else mmap.ACCESS_READ
         if not multi:
             buf = mmap.mmap(self.file.fileno(), 0, access = access, offset = 0)
         for idx in enumeration:
             name, tensor_dtype, tensor_shape, numpy_dtype, numpy_len, requires_grad = pickle.load(self.file)
-            total_tensor_elements += numpy_len
             enumeration.set_description(name)
             pos = self.file.tell()
             if pos % self.pagesize != 0:
                 pos += self.pagesize - (pos % self.pagesize)
 
             bytelen = numpy_dtype.itemsize * numpy_len
+            total_tensor_bytes += bytelen
             if multi:
                 buf = mmap.mmap(self.file.fileno(), bytelen, access = access, offset = pos)
                 tensor_offset = 0
@@ -110,13 +110,13 @@ class PyTorchMap:
                         new_data.update(data)
                     data = new_data
                     warnings.warn(
-                        f'Data presented reordered from file {order_filename}.\n'
-                        'To use this order, resave the data and delete the order file.'
+                        f'\nData presented reordered from file {order_filename}.'
+                        '\nTo use this order, resave the data and delete the order file.'
                     )
             except:
                 pass
         if track_forward_calls:
-            self.track_forward_calls(data, total_tensor_elements, add_prefix = add_prefix, verbose = verbose, preload = tracking_preloads_tensors, retain_unused = retain_unused)
+            self.track_forward_calls(data, total_tensor_bytes, add_prefix = add_prefix, verbose = verbose, preload = tracking_preloads_tensors, retain_unused = retain_unused)
         return data
 
     def exists(self):
@@ -136,18 +136,22 @@ class PyTorchMap:
         if queue is not None:
             queue.put(None)
 
-    def track_forward_calls(self, state_dict, total_tensor_elements, add_prefix, verbose, preload, retain_unused, debug = False):
+    def track_forward_calls(self, state_dict, total_tensor_bytes, add_prefix, verbose, preload, retain_unused, debug = False):
 
         out_of_order = False
 
-        #if verbose:
-        #    import tqdm
-        #    verbose = tqdm.tqdm(total = total_tensor_elements, leave = False)
-        #    processed
+        if verbose:
+            import tqdm
+            verbose = tqdm.tqdm(total = total_tensor_bytes, leave = False, unit = '', unit_scale = True)
+            verbose.close()
 
         if preload:
             preload_queue = queue.Queue(1)
             def preload_loop():
+                if verbose:
+                    nonlocal total_tensor_bytes
+                    verbose.disable = False
+                    verbose.reset(total_tensor_bytes)
                 self._preload_loops[id(state_dict)] = preload_queue
                 for tensor in range(len(state_dict)):
                     if debug:
@@ -162,6 +166,9 @@ class PyTorchMap:
                         for idx in range(0, len(next_tensor), mmap.PAGESIZE):
                             next_tensor[idx]
                 del self._preload_loops[id(state_dict)]
+                if verbose:
+                    total_tensor_bytes = verbose.n
+                    verbose.close()
 
 
             preload_thread = threading.Thread(target=preload_loop)
@@ -187,6 +194,10 @@ class PyTorchMap:
                 stored_idx_key_tensor = stored_idx_key_tensor_by_data.get(parameter.data_ptr())
                 if stored_idx_key_tensor is not None:
                     stored_idx, key, tensor = stored_idx_key_tensor
+
+                    if verbose:
+                        verbose.set_description(key)
+                        verbose.update(len(tensor.flatten()) * tensor.element_size())
                     #print(key, tensor.shape, module.__class__.__name__, pname)
                     # PROGRESS DATA WAS OUTPUT ABOVE LINE
 
@@ -212,6 +223,7 @@ class PyTorchMap:
                     if not is_last:
                         module_tidx_key_tensor_by_read_idx.append((module, tidx, key, tensor))
                     else:
+                        preload_queue.put(None)
                         finished_tracking_calls()
                         break
 
@@ -233,12 +245,12 @@ class PyTorchMap:
                         if key not in state_dict:
                             state_dict[key] = tensor
                 warnings.warn(
-                    f'tensors in {self.filename} are ordered differently from use.\n'
-                    f'they have been sorted in the read state_dict and can be resaved.\n'
-                    f'runtime key order has been written to {order_filename}'
+                    f'\ntensors in {self.filename} are ordered differently from use.'
+                    f'\nthey have been sorted in the read state_dict and can be resaved.'
+                    f'\nruntime key order has been written to {order_filename}'
                 )
             if preload:
-                last_module = module_tidx_key_tensor_by_read_idx[-1][0]
+                last_module, _, last_key, _ = module_tidx_key_tensor_by_read_idx[-1]
                 module_bin = []
                 for (
                     read_idx,
@@ -258,16 +270,25 @@ class PyTorchMap:
                     module_bin.append(prev_tensor)
                     if next_module is not prev_module:
                         # new module
-                        register_module_next_tensor(read_idx - 1, last_module, module_bin)
+                        register_module_next_tensor(read_idx - 1, last_module, last_key, module_bin)
                         module_bin.clear()
                         last_module = prev_module
+                        last_key = prev_key
                 module_bin.append(next_tensor)
-                register_module_next_tensor(read_idx - 1, last_module, module_bin)
+                register_module_next_tensor(read_idx - 1, last_module, last_key, module_bin)
 
-        def register_module_next_tensor(read_idx, module, next_tensors):
+        def register_module_next_tensor(read_idx, module, a_key, next_tensors):
             # the tensors were smaller than ram individually; it was fine to preload them together
+            bytect = sum((len(tensor.flatten()) * tensor.element_size() for tensor in next_tensors))
+            label = a_key
+            if '.' in label:
+                label = label[:label.rfind('.')]
             def prepare_next_tensor(module, input):
                 nonlocal preload_thread
+
+                if verbose:
+                    verbose.set_description(label)
+                    verbose.update(bytect)
 
                 if debug:
                      print('main2 setting result')
