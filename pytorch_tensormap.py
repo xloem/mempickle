@@ -6,6 +6,7 @@ import concurrent.futures
 import mmap
 import os
 import pickle
+import queue
 import struct
 import threading
 import warnings
@@ -46,7 +47,7 @@ class PyTorchMap:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
                 numpy.tofile(output)
 
-    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True):
+    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         assert self.pagesize % mmap.PAGESIZE == 0
@@ -94,18 +95,18 @@ class PyTorchMap:
                     order = json.load(order_file)
                     new_data = {}
                     for key in order:
-                        new_data[key] = data[key]
-                        del data[key]
+                        new_data[add_prefix + key] = data[add_prefix + key]
+                        del data[add_prefix + key]
                     new_data.update(data)
                     data = new_data
-                    warnings.warn(f'Data presented reordered from file {order_filename}.')
-                    warnings.warn('To use this order, resave the data and delete the order file.')
+                    warnings.warn(
+                        f'Data presented reordered from file {order_filename}.\n'
+                        'To use this order, resave the data and delete the order file.'
+                    )
             except:
                 pass
-
-        #import pdb; pdb.set_trace()
         if track_forward_calls:
-            self.track_forward_calls(data, total_tensor_elements, verbose = verbose)
+            self.track_forward_calls(data, total_tensor_elements, add_prefix = add_prefix, verbose = verbose, preload = tracking_preloads_tensors)
         return data
 
     def exists(self):
@@ -120,29 +121,27 @@ class PyTorchMap:
             filename = transformers.file_utils.cached_path(filename, cache_dir = cache_dir, force_download = force_download, proxies = proxies, resume_download = resume_download, local_files_only = local_files_only, use_auth_token = use_auth_token)
         return PyTorchMap(filename)
 
-    def track_forward_calls(self, state_dict, total_tensor_elements, verbose):
+    def track_forward_calls(self, state_dict, total_tensor_elements, add_prefix, verbose, preload, debug = False):
 
         out_of_order = False
 
-        next_to_preload = concurrent.futures.Future()
-        def preload_loop():
-            nonlocal next_to_preload
-            for tensor in range(len(state_dict)):
-                if out_of_order:
-                    print(f'thread waiting for {next_to_preload}')
-                next_tensors = next_to_preload.result()
-                if out_of_order:
-                    print(f'thread got {next_to_preload}')
-                next_to_preload = concurrent.futures.Future()
-                if out_of_order:
-                    print(f'thread will next wait for {next_to_preload}')
-                for next_tensor in next_tensors:
-                    next_tensor = next_tensor.flatten()
-                    for idx in range(0, len(next_tensor), mmap.PAGESIZE):
-                        next_tensor[idx]
+        if preload:
+            preload_queue = queue.Queue(1)
+            def preload_loop():
+                for tensor in range(len(state_dict)):
+                    if debug:
+                        print(f'thread waiting')# for {self._next_to_preload}')
+                    next_tensors = preload_queue.get()
+                    if debug:
+                        print(f'thread got')# {self._next_to_preload}')
+                    for next_tensor in next_tensors:
+                        next_tensor = next_tensor.flatten()
+                        for idx in range(0, len(next_tensor), mmap.PAGESIZE):
+                            next_tensor[idx]
 
-        self.preload_thread = threading.Thread(target=preload_loop)
-        self.preload_thread.start()
+            assert not hasattr(self, 'preload_thread')
+            self.preload_thread = threading.Thread(target=preload_loop)
+            self.preload_thread.start()
 
         tensor_ct = len(state_dict)
         key_tensor_by_stored_idx = [*state_dict.items()]
@@ -168,22 +167,21 @@ class PyTorchMap:
                     if not out_of_order:
                         if stored_idx != next_stored_idx:
                             out_of_order = True
-                    next_stored_idx = stored_idx + 1
-                    if out_of_order:
-                        print(f'main checking {next_to_preload}')
-                    if not next_to_preload.done():
-                        if out_of_order:
+                    next_stored_idx = (stored_idx + 1) % len(key_tensor_by_stored_idx)
+
+                    if preload:
+                        if debug:
                             print('main appending result')
-                        next_to_preload.set_result((key_tensor_by_stored_idx[next_stored_idx][1],))
-                    else:
-                        if out_of_order:
-                            print('main skipping append due to last one not taken yet')
+                        try:
+                            preload_queue.put_nowait((key_tensor_by_stored_idx[next_stored_idx][1],))
+                        except queue.Full:
+                            if debug:
+                                print('main skipping due to last result not take')
 
                     # store read order
                     if len(module_tidx_key_tensor_by_read_idx) == 0 or tensor is not module_tidx_key_tensor_by_read_idx[0][-1]:
                         module_tidx_key_tensor_by_read_idx.append((module, tidx, key, tensor))
                     else:
-                        #import pdb; pdb.set_trace()
                         finished_tracking_calls()
                         break
 
@@ -194,61 +192,55 @@ class PyTorchMap:
             if out_of_order:
                 state_dict.clear()
                 state_dict.update({
-                    key : tensor
+                    (key[len(add_prefix):] if key.startswith(add_prefix) else key) : tensor
                     for module, tidx, key, tensor in module_tidx_key_tensor_by_read_idx
                 })
-                warnings.warn(f'tensors in {self.filename} are ordered differently from use.')
-                warnings.warn(f'they have been sorted in the read state_dict and can be resaved.')
                 order_filename = self.filename + '.order.json'
                 with open(order_filename, 'wt') as order_file:
                     json.dump([*state_dict.keys()], order_file)
-                warnings.warn(f'runtime key order has been written to {order_filename}')
-                #import pdb; pdb.set_trace()
-            last_module = None
-            module_bin = []
-            for (
-                read_idx,
-                (
-                    (prev_module, prev_tidx, prev_key, prev_tensor),
-                    (next_module, next_tidx, next_key, next_tensor)
+                warnings.warn(
+                    f'tensors in {self.filename} are ordered differently from use.\n'
+                    f'they have been sorted in the read state_dict and can be resaved.\n'
+                    f'runtime key order has been written to {order_filename}'
                 )
-            ) in enumerate(zip(
-                module_tidx_key_tensor_by_read_idx[:-1],
-                module_tidx_key_tensor_by_read_idx[1:]
-            )):
-                #if last_module is None:
-                #    last_module = prev_module
-                #if prev_module is last_module:
-                #    if next_module is last_module:
-                #        # going thru start i guess
-                #        pass
-                #    elif next_module is not last_module:
-                #        module_bin.append(next_tensor)
-                #elif prev_module is not last_module:
-                #    if next_module is prev_module:
-                #        module_bin.append(next_tensor)
-                #    elif next_module is not prev_module:
-                #if next_module is not last_module:
-                if prev_module in (last_module, next_module):
-                    module_bin.append(next_tensor)
-                else:
-                    if last_module is not None:
+            if preload:
+                last_module = module_tidx_key_tensor_by_read_idx[-1][0]
+                module_bin = []
+                for (
+                    read_idx,
+                    (
+                        (prev_module, prev_tidx, prev_key, prev_tensor),
+                        (next_module, next_tidx, next_key, next_tensor)
+                    )
+                ) in enumerate(zip(
+                    module_tidx_key_tensor_by_read_idx[:-1],
+                    module_tidx_key_tensor_by_read_idx[1:]
+                )):
+                    if debug and last_module in (prev_module, next_module):
+                        # this just verifies logic is correct
+                        import pdb; pdb.set_trace()
+                        assert last_module not in (prev_module, next_module)
+    
+                    module_bin.append(prev_tensor)
+                    if next_module is not prev_module:
+                        # new module
                         register_module_next_tensor(read_idx - 1, last_module, module_bin)
-                    module_bin.clear()
-                    last_module = prev_module
+                        module_bin.clear()
+                        last_module = prev_module
+                module_bin.append(next_tensor)
+                register_module_next_tensor(read_idx - 1, last_module, module_bin)
 
         def register_module_next_tensor(read_idx, module, next_tensors):
-            # the tensors are smaller than ram individually; it is fine to preload them together
+            # the tensors were smaller than ram individually; it was fine to preload them together
             def prepare_next_tensor(module, input):
-                if out_of_order:
-                    print(f'main2 checking {next_to_preload}')
-                if not next_to_preload.done():
-                    if out_of_order:
-                        print('main2 setting result')
-                    next_to_preload.set_result(next_tensors)
-                else:
-                    if out_of_order:
-                        print('main2 skipping due to last result not taken')
+                if debug:
+                     print('main2 setting result')
+                try:
+                    preload_queue.put_nowait(next_tensors)
+                except queue.Full:
+                    if debug:
+                        print('main2 skipping due to last result not take')
+
                 if not self.preload_thread.is_alive():
                     self.preload_thread = threading.Thread(target=preload_loop)
                     self.preload_thread.start()
@@ -268,7 +260,6 @@ class Ctx:
         PyTorchMap._cache = {}
         self._torch_load = torch.load
         def torch_load_wrapper(fn, *params, **kwparams):
-            #import pdb; pdb.set_trace()
             try:
                 result = PyTorchMap._cache.get(fn, None)
                 if result is None:
