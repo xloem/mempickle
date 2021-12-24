@@ -131,10 +131,14 @@ class PyTorchMap:
             filename = transformers.file_utils.cached_path(filename, cache_dir = cache_dir, force_download = force_download, proxies = proxies, resume_download = resume_download, local_files_only = local_files_only, use_auth_token = use_auth_token)
         return PyTorchMap(filename)
 
-    def cancel_preload_loop(self, state_dict):
-        queue = self._preload_loops.get(id(state_dict), None)
-        if queue is not None:
-            queue.put(None)
+    def cancel_preload(self, state_dict = None):
+        if state_dict is not None:
+            queue = self._preload_loops.get(id(state_dict), None)
+            if queue is not None:
+                queue.put(None)
+        else:
+            for queue in self._preload_loops.values():
+                queue.put(None)
 
     def track_forward_calls(self, state_dict, total_tensor_bytes, add_prefix, verbose, preload, retain_unused, debug = False):
 
@@ -143,7 +147,7 @@ class PyTorchMap:
         if verbose:
             import tqdm
             verbose = tqdm.tqdm(total = total_tensor_bytes, leave = False, unit = '', unit_scale = True)
-            verbose.close()
+            verbose.update(); verbose.close()
 
         if preload:
             preload_queue = queue.Queue(1)
@@ -372,28 +376,65 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output_filename', required=False, help='.ptmap file to output to')
     parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
     parser.add_argument('-q', '--quiet', '-s', '--silent', action='store_true', help='disable saving progress meter')
+    parser.add_argument('-r', '--reorder', action='store_true', help='treat the input as a ptmap file to reoutput packed for ordering')
     args = parser.parse_args()
 
-    if os.path.isdir(args.input_path):
-        args.input_path = os.path.join(args.input_path, transformers.file_utils.WEIGHTS_NAME)
+    if not args.reorder:
+        if os.path.isdir(args.input_path):
+            args.input_path = os.path.join(args.input_path, WEIGHTS_NAME)
 
-    if not args.output_filename:
-        basename = args.input_path
-        if basename.endswith('.pt'):
-            basename = basename[:-len('.pt')]
-        elif basename.endswith('.bin'):
-            basename = basename[:-len('.bin')]
-        args.output_filename = basename + '.ptmap'
+        if not args.output_filename:
+            basename = args.input_path
+            if basename.endswith('.pt'):
+                basename = basename[:-len('.pt')]
+            elif basename.endswith('.bin'):
+                basename = basename[:-len('.bin')]
+            args.output_filename = basename + '.ptmap'
 
-    tensormap = PyTorchMap(args.output_filename)
+        outputmap = PyTorchMap(args.output_filename)
 
-    assert not tensormap.exists() or args.force
+        assert not outputmap.exists() or args.force
 
-    if not args.quiet:
-        print(f'Loading {args.input_path} ...', file=sys.stderr)
-    torch_data = torch.load(args.input_path)
+        if not args.quiet:
+            print(f'Loading {args.input_path} ...', file=sys.stderr)
+        torch_data = torch.load(args.input_path)
 
-    if not args.quiet:
-        print(f'Writing {args.output_filename} ...', file=sys.stderr)
-    tensormap.write(torch_data, verbose=not args.quiet)
+        if not args.quiet:
+            print(f'Writing {args.output_filename} ...', file=sys.stderr)
+
+        outputmap.write(torch_data, verbose=not args.quiet)
+
+    elif args.reorder:
+        if os.path.isdir(args.input_path):
+            args.input_path = os.path.join(args.input_path, PTMAP_WEIGHTS_NAME)
+
+        assert os.path.exists(args.input_path + '.order.json')
+
+        assert args.output_filename #or args.force
+
+        ## this unfortunately would clobber its own memory
+        #if not args.output_filename:
+        #    args.output_filename = args.input_path
+
+        inputmap = PyTorchMap(args.input_path)
+        outputmap = PyTorchMap(args.output_filename)
+        
+        assert inputmap.exists()
+
+        assert not outputmap.exists() or args.force
+
+        if not args.quiet:
+            print(f'Loading {args.input_path} ...', file=sys.stderr)
+
+        tensor_data = inputmap.read(verbose=not args.quiet, writeable = True, track_forward_calls = False)
+
+        if not args.quiet:
+            print(f'Writing {args.output_filename} ...', file=sys.stderr)
+
+        outputmap.write(tensor_data, pagesize=1, verbose=not args.quiet)
+
+        if args.output_filename == args.input_path:
+            if not args.quiet:
+                print(f'Deleting {args.input_path}.order.json ...', file=sys.stderr)
+                os.unlink(args.input_path + '.order.json')
     
