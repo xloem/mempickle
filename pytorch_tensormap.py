@@ -42,15 +42,24 @@ class PyTorchMap:
                 if verbose:
                     enumerated_items.set_description(name)
                 flat_tensor = tensor.flatten()
-                # numpy is only used because it seemed easier to quickly implement when writing this
-                numpy = flat_tensor.numpy()
-                numpy_dtype = numpy.dtype
-                tensor_header = pickle.dumps((name, tensor.dtype, tuple(tensor.shape), numpy_dtype, len(numpy), tensor.requires_grad))
+                try:
+                    # numpy is only used because it seemed easier to quickly implement when writing this
+                    numpy = flat_tensor.numpy()
+                    numpy_dtype = numpy.dtype
+                except TypeError: # numpy doesn't support all pytorch types
+                    numpy = None
+                    numpy_dtype = None
+                tensor_header = pickle.dumps((name, tensor.dtype, tuple(tensor.shape), numpy_dtype, len(flat_tensor), tensor.requires_grad))
                 output.write(tensor_header)
                 pos = output.tell()
                 if pos % self.pagesize != 0:
                     output.seek(pos - (pos % self.pagesize) + self.pagesize)
-                numpy.tofile(output)
+                if numpy is not None:
+                    numpy.tofile(output)
+                else:
+                    import ctypes
+                    array = ctypes.cast(flat_tensor.data_ptr(), ctypes.POINTER(ctypes.c_char))
+                    output.write(array[:len(flat_tensor)*flat_tensor.element_size()])
 
     def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True, enforce_aligned = False, retain_unused = False):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
@@ -73,7 +82,7 @@ class PyTorchMap:
             if pos % self.pagesize != 0:
                 pos += self.pagesize - (pos % self.pagesize)
 
-            bytelen = numpy_dtype.itemsize * numpy_len
+            bytelen = torch.tensor(0, dtype=tensor_dtype).element_size() * numpy_len
             total_tensor_bytes += bytelen
             if multi:
                 buf = mmap.mmap(self.file.fileno(), bytelen, access = access, offset = pos)
@@ -85,6 +94,7 @@ class PyTorchMap:
                 tensor = torch.frombuffer( # readonly warning; use read(writeable = True) to write
                         buf, dtype = tensor_dtype, count = numpy_len, offset = tensor_offset, requires_grad = requires_grad)
             except AttributeError:
+                warnings.warn('torch does not support buffer loading')
                 numpy = np.frombuffer(buf, numpy_dtype, count = numpy_len, offset = tensor_offset)
                 tensor = torch.from_numpy(numpy)
                 tensor.requires_grad = requires_grad
@@ -139,6 +149,9 @@ class PyTorchMap:
         else:
             for queue in self._preload_loops.values():
                 queue.put(None)
+
+    def __del__(self):
+        self.cancel_preload()
 
     def track_forward_calls(self, state_dict, total_tensor_bytes, add_prefix, verbose, preload, retain_unused, debug = False):
 
@@ -202,7 +215,7 @@ class PyTorchMap:
                     if verbose:
                         verbose.set_description(key)
                         verbose.update(len(tensor.flatten()) * tensor.element_size())
-                    #print(key, tensor.shape, module.__class__.__name__, pname)
+                    print(key, tensor.shape, module.__class__.__name__, pname)
                     # PROGRESS DATA WAS OUTPUT ABOVE LINE
 
                     is_last = len(module_tidx_key_tensor_by_read_idx) > 0 and tensor is module_tidx_key_tensor_by_read_idx[0][-1]
