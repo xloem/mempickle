@@ -11,20 +11,20 @@ if os.uname().machine == 'aarch64' and not torch.cuda.is_available():
         def patch(func):
             for module in modules:
                 setattr(module, func.__name__, func)
+            return func
         return patch
     
     @patch(torch)
     def mm(mat1, mat2, *, out=None):
         if out is None:
-            out = torch.empty((mat1.shape[0], mat2.shape[1]))
-        np.matmul(mat1.numpy(), mat2.numpy(), out=out.numpy())
+            out = torch.einsum('ij,jk->ik', mat1, mat2)
+        else:
+            out[:] = torch.einsum('ij,jk->ik', mat1, mat2)
         return out
     
     @patch(torch)
     def addmm(input, mat1, mat2, *, beta=1, alpha=1, out=None):
-        if out is None:
-            out = torch.empty((mat1.shape[0], mat2.shape[1]))
-        np.matmul(mat1.numpy(), mat2.numpy(), out=out.numpy())
+        out = mm(mat1, mat2, out=out)
         out *= alpha
         if beta != 0:
             out += input * beta
@@ -33,12 +33,8 @@ if os.uname().machine == 'aarch64' and not torch.cuda.is_available():
     @patch(torch._C._nn)
     def linear(input, weight, bias = None):
         weight_rows = weight.shape[0]
-        out = torch.empty((*input.shape[:-1], weight_rows))
-        np.matmul(
-            input.view((-1, input.shape[-1])).numpy(),
-            weight.T.numpy(),
-            out=out.view((-1, weight_rows)).numpy()
-        )
+        out = mm(input.view((-1, input.shape[-1])), weight.T)
+        out = out.view((*input.shape[:-1], weight_rows))
         if bias is not None:
             out += bias
         return out
