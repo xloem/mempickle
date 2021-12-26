@@ -25,9 +25,12 @@ class PyTorchMap:
     endian = ['big', 'little'][np.array(1).tobytes()[0]]
     pagesize = mmap.PAGESIZE
 
-    def write(self, data, verbose = True, pagesize = mmap.PAGESIZE, enforce_aligned = False, remove_prefix = ''):
+    def write(self, data, verbose = True, pagesize = mmap.PAGESIZE, enforce_aligned = False, remove_prefix = '', dtype = None):
         if enforce_aligned:
             assert pagesize % mmap.PAGESIZE == 0
+        if dtype:
+            if type(dtype) is str:
+                dtype = getattr(torch, dtype)
         self.pagesize = pagesize
         with open(self.filename, 'wb') as output:
             header = pickle.dumps((self.version, self.pagesize, len(data)))
@@ -42,6 +45,8 @@ class PyTorchMap:
                 if verbose:
                     enumerated_items.set_description(name)
                 flat_tensor = tensor.flatten()
+                if dtype and dtype is not flat_tensor.dtype:
+                    flat_tensor = flat_tensor.to(dtype)
                 try:
                     # numpy is only used because it seemed easier to quickly implement when writing this
                     numpy = flat_tensor.numpy()
@@ -49,7 +54,7 @@ class PyTorchMap:
                 except TypeError: # numpy doesn't support all pytorch types
                     numpy = None
                     numpy_dtype = None
-                tensor_header = pickle.dumps((name, tensor.dtype, tuple(tensor.shape), numpy_dtype, len(flat_tensor), tensor.requires_grad))
+                tensor_header = pickle.dumps((name, flat_tensor.dtype, tuple(tensor.shape), numpy_dtype, len(flat_tensor), tensor.requires_grad))
                 output.write(tensor_header)
                 pos = output.tell()
                 if pos % self.pagesize != 0:
@@ -58,8 +63,11 @@ class PyTorchMap:
                     numpy.tofile(output)
                 else:
                     import ctypes
-                    array = ctypes.cast(flat_tensor.data_ptr(), ctypes.POINTER(ctypes.c_char))
-                    output.write(array[:len(flat_tensor)*flat_tensor.element_size()])
+                    bytect = len(flat_tensor) * flat_tensor.element_size()
+                    carray = (ctypes.c_char * bytect).from_address(flat_tensor.data_ptr())
+                    output.write(carray)
+                    #array = ctypes.cast(flat_tensor.data_ptr(), ctypes.POINTER(ctypes.c_char))
+                    #output.write(array[:len(flat_tensor)*flat_tensor.element_size()])
 
     def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True, enforce_aligned = False, retain_unused = False):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
@@ -159,7 +167,7 @@ class PyTorchMap:
 
         if verbose:
             import tqdm
-            verbose = tqdm.tqdm(total = total_tensor_bytes, leave = False, unit = '', unit_scale = True)
+            verbose = tqdm.tqdm(total = total_tensor_bytes, leave = False, unit = '', unit_scale = True, smoothing = 0)
             verbose.update(); verbose.close()
 
         if preload:
@@ -389,10 +397,11 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output_filename', required=False, help='.ptmap file to output to')
     parser.add_argument('-f', '--force', action='store_true', help='overwrite existing files')
     parser.add_argument('-q', '--quiet', '-s', '--silent', action='store_true', help='disable saving progress meter')
-    parser.add_argument('-r', '--reorder', action='store_true', help='treat the input as a ptmap file to reoutput packed for ordering')
+    parser.add_argument('-t', '--dtype', type=str, help='cast to the provided datatype before writing')
+    parser.add_argument('-m', '--map', action='store_true', help='input is a ptmap file for reoutput. page padding is removed.')
     args = parser.parse_args()
 
-    if not args.reorder:
+    if not args.map and not args.input_path.endswith('.ptmap'):
         if os.path.isdir(args.input_path):
             args.input_path = os.path.join(args.input_path, WEIGHTS_NAME)
 
@@ -415,13 +424,11 @@ if __name__ == '__main__':
         if not args.quiet:
             print(f'Writing {args.output_filename} ...', file=sys.stderr)
 
-        outputmap.write(torch_data, verbose=not args.quiet)
+        outputmap.write(torch_data, verbose=not args.quiet, dtype=args.dtype)
 
-    elif args.reorder:
+    elif args.map or args.input_path.endswith('.ptmap'):
         if os.path.isdir(args.input_path):
             args.input_path = os.path.join(args.input_path, PTMAP_WEIGHTS_NAME)
-
-        assert os.path.exists(args.input_path + '.order.json')
 
         assert args.output_filename #or args.force
 
@@ -444,10 +451,5 @@ if __name__ == '__main__':
         if not args.quiet:
             print(f'Writing {args.output_filename} ...', file=sys.stderr)
 
-        outputmap.write(tensor_data, pagesize=1, verbose=not args.quiet)
-
-        if args.output_filename == args.input_path:
-            if not args.quiet:
-                print(f'Deleting {args.input_path}.order.json ...', file=sys.stderr)
-                os.unlink(args.input_path + '.order.json')
+        outputmap.write(tensor_data, pagesize=1, verbose=not args.quiet, dtype=args.dtype)
     
