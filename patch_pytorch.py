@@ -38,10 +38,14 @@ if (
 
     import bfloat16, ctypes, numpy as np
 
-    def patch(*modules):
+    def patch(*modules, aliases = ()):
+        if type(aliases) is str:
+            aliases = aliases.split(' ')
         def patch(func):
             for module in modules:
                 setattr(module, func.__name__, func)
+                for alias in aliases:
+                    setattr(module, alias, func)
             return func
         return patch
 
@@ -50,11 +54,11 @@ if (
         carray = (ctypes.c_char * bytect).from_address(t.data_ptr())
         return np.ndarray(shape=t.shape, buffer=carray, dtype=bfloat16.bfloat16)
     
-    @patch(torch)
+    @patch(torch, aliases='matmul')
     def mm(mat1, mat2, *, out=None):
         ## numpy matmul does not crash.  bfloat16 needs an additional package. ##
         if out is None:
-            out = torch.empty((mat1.shape[0], mat2.shape[1]), dtype = mat1.dtype)
+            out = torch.empty((*mat1.shape[:-2], mat1.shape[-2], mat2.shape[-1]), dtype = mat1.dtype)
         if mat1.dtype is torch.bfloat16:
             mat1, mat2, npout = npbfloat16(mat1), npbfloat16(mat2), npbfloat16(out)
             npout[:] = np.matmul(mat1, mat2)
