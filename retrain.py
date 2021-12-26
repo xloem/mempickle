@@ -7,7 +7,7 @@ def load_model(model, writeable = False):
     else:
         config = model.config
     with pytorch_tensormap.Ctx(writeable = writeable):
-        framework, model = transformers.pipelines.infer_framework_load_model(model, config)
+        framework, model = transformers.pipelines.infer_framework_load_model(model, config, low_cpu_mem_usage = True)
     return framework, model
 
 class stype:
@@ -15,11 +15,11 @@ class stype:
         self.dtype = dtype
         self.size = torch.tensor(0, dtype=self.dtype).element_size()
 
-def walk_module_tree(name, mod, desc_visitor = lambda name, mod, depth: None, asc_visitor = lambda name, mod, depth: None, depth = 0):
-    desc_visitor(name, mod, depth)
+def walk_module_tree(name_parts, mod, desc_visitor = lambda name_parts, mod: None, asc_visitor = lambda name_parts, mod: None):
+    desc_visitor(name_parts, mod)
     for subname, submod in mod.named_children():
-        walk_module_tree(name + '.' + subname, submod, desc_visitor, asc_visitor, depth + 1)
-    asc_visitor(name, mod, depth)
+        walk_module_tree((*name_parts, subname), submod, desc_visitor, asc_visitor)
+    asc_visitor(name_parts, mod)
 
 class Retrainer:
     def __init__(self, src_model, dst_model, mem_limit = 512*1024*1024):
@@ -33,16 +33,17 @@ class Retrainer:
         
         for name, mod in self.models.items():
             max_depth = 0
-            def desc_visitor(name, mod, depth):
+            def desc_visitor(name_parts, mod):
                 nonlocal max_depth
-                max_depth = max(max_depth, depth)
-            walk_module_tree(name, mod, desc_visitor=desc_visitor)
+                max_depth = max(max_depth, len(name_parts))
+            walk_module_tree((name,), mod, desc_visitor=desc_visitor)
             self.modules_by_shallowness[name] = [{} for x in range(max_depth+1)]
-            def desc_visitor(subname, mod, depth):
-                shallowness = max_depth - depth
+            def desc_visitor(name_parts, mod):
+                shallowness = max_depth - len(name_parts)
                 if type(mod) is not torch.nn.Dropout:
+                    subname = '.'.join(name_parts[1:])
                     self.modules_by_shallowness[name][shallowness][subname] = mod
-            walk_module_tree(name, mod, desc_visitor=desc_visitor)
+            walk_module_tree((name,), mod, desc_visitor=desc_visitor)
     def datagen_for_mod(self, mod):
         input_const_factor = 0
         calc_const_factor = 0
@@ -141,17 +142,18 @@ class Retrainer:
             def rand():
                 return torch.randn(input_shape, dtype=input_stype.dtype) * input_value_scale
         return rand
-    def compare_mod(self, modname):
-        return self.compare_mods(modname, modname)
+    #def compare_mod(self, modname):
+    #    return self.compare_mods(modname, modname)
     def compare_mods(self, src_module, dst_module):
-        if type(src_module) is str:
-            src_module = self.src_modules[src_module]
-        if type(dst_module) is str:
-            dst_module = self.dst_modules[dst_module]
+        #if type(src_module) is str:
+        #    src_module = self.src_modules[src_module]
+        #if type(dst_module) is str:
+        #    dst_module = self.dst_modules[dst_module]
 
         datagen = self.datagen_for_mod(src_module)
         data = datagen()
-        out1 = src_module(data)
+        with torch.no_grad():
+            out1 = src_module(data)
         out2 = dst_module(data)
         if type(out1) is tuple:
             out1 = torch.stack([elem for elem in out1 if elem is not None])
@@ -166,9 +168,10 @@ class Retrainer:
         mods = []
         with torch.no_grad():
             for (src_name, src_module), (dst_name, dst_module) in zip(src_modules.items(), dst_modules.items()):
+                assert src_name == dst_name
                 out1, out2 = self.compare_mods(src_module, dst_module)
                 diff = (out1 - out2).abs().mean()
-                print(src_name, dst_name, diff)
+                #print(src_name, dst_name, diff)
                 mods.append((diff, (src_name, src_module), (dst_name, dst_module)))
         mods.sort(key=lambda mod_entry: mod_entry[0], reverse=True)
         return mods
