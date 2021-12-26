@@ -399,9 +399,18 @@ if __name__ == '__main__':
     parser.add_argument('-q', '--quiet', '-s', '--silent', action='store_true', help='disable saving progress meter')
     parser.add_argument('-t', '--dtype', type=str, help='cast to the provided datatype before writing')
     parser.add_argument('-m', '--map', action='store_true', help='input is a ptmap file for reoutput. page padding is removed.')
+    parser.add_argument('-p', '--pagesize', type=int, help='size to align output tensors to, 1 for no alignment')
+    parser.add_argument('--get-order', action='store_true', help='output is a .order.json file for copying order')
     args = parser.parse_args()
 
-    if not args.map and not args.input_path.endswith('.ptmap'):
+    if args.input_path.endswith('.ptmap'):
+        args.map = True
+    if args.output_filename.endswith('.order.json'):
+        args.get_order = True
+    if not args.pagesize:
+        args.pagesize = PyTorchMap.pagesize
+
+    if not args.map:
         if os.path.isdir(args.input_path):
             args.input_path = os.path.join(args.input_path, WEIGHTS_NAME)
 
@@ -419,14 +428,9 @@ if __name__ == '__main__':
 
         if not args.quiet:
             print(f'Loading {args.input_path} ...', file=sys.stderr)
-        torch_data = torch.load(args.input_path)
+        tensor_data = torch.load(args.input_path)
 
-        if not args.quiet:
-            print(f'Writing {args.output_filename} ...', file=sys.stderr)
-
-        outputmap.write(torch_data, verbose=not args.quiet, dtype=args.dtype)
-
-    elif args.map or args.input_path.endswith('.ptmap'):
+    elif args.map:
         if os.path.isdir(args.input_path):
             args.input_path = os.path.join(args.input_path, PTMAP_WEIGHTS_NAME)
 
@@ -448,8 +452,11 @@ if __name__ == '__main__':
 
         tensor_data = inputmap.read(verbose=not args.quiet, writeable = True, track_forward_calls = False)
 
-        if not args.quiet:
-            print(f'Writing {args.output_filename} ...', file=sys.stderr)
+    if not args.quiet:
+        print(f'Writing {args.output_filename} ...', file=sys.stderr)
 
-        outputmap.write(tensor_data, pagesize=1, verbose=not args.quiet, dtype=args.dtype)
-    
+    if not args.get_order:
+        outputmap.write(tensor_data, pagesize=args.pagesize, verbose=not args.quiet, dtype=args.dtype)
+    else:
+        with open(outputmap.filename, 'wt') as outputfile:
+            json.dump([*tensor_data.keys()], outputfile)
