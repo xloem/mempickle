@@ -63,21 +63,21 @@ if (
     class mm_impl(torch.autograd.Function):
         @staticmethod
         def backward(ctx, grad_output):
-            mat1, mat2 = ctx.saved_tensors
-            mat1_needs_grad, mat2_needs_grad = ctx.needs_input_grad
+            mat1, mat2, alpha = ctx.saved_tensors
+            alpha_conj = alpha.conj()
+            mat1_needs_grad, mat2_needs_grad, _, _ = ctx.needs_input_grad
             mat1_grad, mat2_grad = None, None
             if grad_output is not None:
                 # ported from torch/csrc/autograd: FunctionsManual.cpp and generated/Functions.cpp
                 if mat1_needs_grad:
-                    mat1_grad = mm(grad_output, mat2.T.conj()) * ctx.alpha.conj()
+                    mat1_grad = mm(grad_output, mat2.T.conj()) * alpha_conj
                 if mat2_needs_grad:
-                    mat2_grad = mm(mat1.T.conj(), grad_output) * ctx.alpha.conj()
-            return mat1_grad, mat2_grad
+                    mat2_grad = mm(mat1.T.conj(), grad_output) * alpha_conj
+            return mat1_grad, mat2_grad, None, None
         @staticmethod
         #@torch.autograd.function.once_differentiable
-        def forward(ctx, mat1, mat2, out = None, alpha = 1):
-            ctx.save_for_backward(mat1, mat2)
-            ctx.alpha = alpha
+        def forward(ctx, mat1, mat2, out = None, alpha = torch.tensor(1)):
+            ctx.save_for_backward(mat1, mat2, alpha)
             ctx.set_materialize_grads(False)
 
             if out is None:
@@ -123,7 +123,7 @@ if (
         return mm_impl.apply(mat1, mat2, out)
     
     @patch(torch)
-    def addmm(input, mat1, mat2, *, beta=1, alpha=1, out=None):
+    def addmm(input, mat1, mat2, *, beta=torch.tensor(1), alpha=torch.tensor(1), out=None):
         out = mm_impl.apply(mat1, mat2, out, alpha)
         if beta != 0:
             out += input * beta
