@@ -2,10 +2,29 @@ import torch
 import os
 import sys
 
+def mm_aarch64_succeeds():
+    pid = os.fork()
+
+    if pid == 0:
+        # in child process
+        try:
+            # crashing operation
+            torch.mm(torch.randn((4096,4096)), torch.randn((4096,4096)))
+        except:
+            sys.exit(-1)
+        else:
+            sys.exit(0)
+
+    elif pid != 0:
+        # in parent process
+        pid, status = os.waitpid(pid, 0)
+        status = os.waitstatus_to_exitcode(status)
+        return status == 0
+
 if (
     os.uname().machine == 'aarch64'
     and not torch.cuda.is_available()
-    and os.popen(f"{sys.executable} -c 'import torch; torch.mm(torch.randn((4096,4096)), torch.randn((4096,4096)))'").close() not in (None, 0, True)
+    and not mm_aarch64_succeeds()
 ):
     import warnings
 
