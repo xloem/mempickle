@@ -69,7 +69,7 @@ class PyTorchMap:
                     #array = ctypes.cast(flat_tensor.data_ptr(), ctypes.POINTER(ctypes.c_char))
                     #output.write(array[:len(flat_tensor)*flat_tensor.element_size()])
 
-    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = True, tracking_preloads_tensors = True, enforce_aligned = False, retain_unused = False):
+    def read(self, writeable = False, verbose = True, multi = False, add_prefix = '', track_forward_calls = False, tracking_preloads_tensors = True, enforce_aligned = False, retain_unused = False):
         self.file = open(self.filename, 'r+b' if writeable else 'rb')
         self.version, self.pagesize, data_len = pickle.load(self.file)
         if multi or enforce_aligned:
@@ -338,6 +338,7 @@ class Ctx:
         if self.offline is not None:
             transformers.file_utils._is_offline_mode = self.offline
         transformers.file_utils.WEIGHTS_NAME = PTMAP_WEIGHTS_NAME
+        transformers.modeling_utils.WEIGHTS_NAME = PTMAP_WEIGHTS_NAME
         
         PyTorchMap._cache = {}
         self._torch_load = torch.load
@@ -386,6 +387,7 @@ class Ctx:
         transformers.pipeline= self._transformers_pipeline
         torch.save = self._torch_save
         torch.load = self._torch_load
+        transformers.modeling_utils.WEIGHTS_NAME = WEIGHTS_NAME
         transformers.file_utils.WEIGHTS_NAME = WEIGHTS_NAME
         transformers.file_utils._is_offline_mode = self._transformers_offline
 
