@@ -28,10 +28,12 @@ class PyTorchMap:
     def write(self, data, verbose = True, pagesize = mmap.PAGESIZE, enforce_aligned = False, remove_prefix = '', dtype = None):
         if enforce_aligned:
             assert pagesize % mmap.PAGESIZE == 0
+        self.pagesize = pagesize
         if dtype:
             if type(dtype) is str:
                 dtype = getattr(torch, dtype)
-        self.pagesize = pagesize
+        if len(remove_prefix) and remove_prefix[-1] != '.':
+            remove_prefix += '.'
         with open(self.filename, 'wb') as output:
             header = pickle.dumps((self.version, self.pagesize, len(data)))
             output.write(header)
@@ -74,6 +76,8 @@ class PyTorchMap:
         self.version, self.pagesize, data_len = pickle.load(self.file)
         if multi or enforce_aligned:
             assert self.pagesize % mmap.PAGESIZE == 0
+        if len(add_prefix) and add_prefix[-1] != '.':
+            add_prefix += '.'
         data = {}
         total_tensor_bytes = 0
         enumeration = range(data_len)
@@ -377,6 +381,11 @@ class Ctx:
             model_kwargs['low_cpu_mem_usage'] = True
             return self._transformers_pipeline(*params, model_kwargs = model_kwargs, **kwparams)
         transformers.pipeline = pipeline_wrapper
+        #self._transformers_pretrainedmodel_from_pretrained = transformers.modeling_utils.PreTrainedModel.__dict__['from_pretrained']
+        #@classmethod
+        #def from_pretrained(cls, *params, low_cpu_mem_usage = False, **kwparams):
+        #    return self._transformers_pretrainedmodel_from_pretrained(cls, *params, low_cpu_mem_usage = True, **kwparams)
+        #transformers.modeling_utils.PreTrainedModel.__dict__['from_pretrained'] = from_pretrained
         def Linear_wrapper(in_features, out_features, bias = True, device = None, dtype = None):
             return torch.nn.LazyLinear(out_features, bias, device, dtype)
         self._torch_nn_linear = torch.nn.Linear
@@ -384,6 +393,7 @@ class Ctx:
 
     def __exit__(self, *params, **kwparams):
         torch.nn.Linear = self._torch_nn_linear
+        #transformers.modeling_utils.PreTrainedModel.__dict__['from_pretrained'] = self._transformers_pretrainedmodel_from_pretrained
         transformers.pipeline= self._transformers_pipeline
         torch.save = self._torch_save
         torch.load = self._torch_load
