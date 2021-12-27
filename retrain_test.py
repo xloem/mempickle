@@ -4,7 +4,7 @@ import retrain
 import torch
 
 LR = 0.00001
-reer = retrain.Retrainer('/mnt/4/models/gpt2-ptmap', '/mnt/4/models/gpt2-ptmap16')
+reer = retrain.Retrainer('/mnt/4/models/gpt2-ptmap', '/mnt/4/models/gpt2-ptmap16', add_prefix='transformer')
 print('Measuring differences ...')
 mods = reer.mods_by_difference(shallowness=2)
 loss, (src_name, src_block), (dst_name, dst_block) = mods[0]
