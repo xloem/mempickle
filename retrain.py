@@ -1,12 +1,14 @@
 import pytorch_tensormap
 import torch, transformers
 
-def load_model(model, writeable = False):
+def load_model(model, writeable = False, add_prefix = ''):
+    # is this function redundant with a static function in PyTorchMap that loads from model ?
+    # regardless this function probably goes in that file
     if type(model) is str:
         config = transformers.models.auto.configuration_auto.AutoConfig.from_pretrained(model)
     else:
         config = model.config
-    with pytorch_tensormap.Ctx(writeable = writeable):
+    with pytorch_tensormap.Ctx(writeable = writeable, add_prefix = add_prefix):
         framework, model = transformers.pipelines.infer_framework_load_model(model, config, low_cpu_mem_usage = True)
     return framework, model
 
@@ -22,12 +24,12 @@ def walk_module_tree(name_parts, mod, desc_visitor = lambda name_parts, mod: Non
     asc_visitor(name_parts, mod)
 
 class Retrainer:
-    def __init__(self, src_model, dst_model, mem_limit = 512*1024*1024):
+    def __init__(self, src_model, dst_model, mem_limit = 512*1024*1024, add_prefix = ''):
         self.mem_limit = mem_limit
         self.models = {}
-        _, self.models['src'] = load_model(src_model)
+        _, self.models['src'] = load_model(src_model, add_prefix = add_prefix)
         self.models['src'].eval()
-        _, self.models['dst'] = load_model(dst_model, writeable = True)
+        _, self.models['dst'] = load_model(dst_model, add_prefix = add_prefix, writeable = True)
 
         self.modules_by_shallowness = {}
         
