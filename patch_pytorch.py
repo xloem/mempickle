@@ -59,6 +59,12 @@ if (
         bytect = len(t.flatten()) * 2
         carray = (ctypes.c_char * bytect).from_address(t.data_ptr())
         return np.ndarray(shape=t.shape, buffer=carray, dtype=bfloat16.bfloat16)
+
+    def t2np(t):
+        if t.dtype is torch.bfloat16:
+            return npbfloat16(t)
+        else:
+            return t.numpy()
     
     class mm_impl(torch.autograd.Function):
         @staticmethod
@@ -68,6 +74,12 @@ if (
             mat1_needs_grad, mat2_needs_grad, _, _ = ctx.needs_input_grad
             mat1_grad, mat2_grad = None, None
             if grad_output is not None:
+                #if mat1.dtype is torch.bfloat16:
+                #    mat1 = mat1.to(torch.float32)
+                #if mat2.dtype is torch.bfloat16:
+                #    mat2 = mat2.to(torch.float32)
+                #if grad_output.dtype is torch.bfloat16:
+                #    grad_output = grad_output.to(torch.float64)
                 # ported from torch/csrc/autograd: FunctionsManual.cpp and generated/Functions.cpp
                 if mat1_needs_grad:
                     mat1_grad = mm(grad_output, mat2.T.conj()) * alpha_conj
@@ -80,15 +92,19 @@ if (
             ctx.save_for_backward(mat1, mat2, alpha)
             ctx.set_materialize_grads(False)
 
+
             if out is None:
-                out = torch.empty((*mat1.shape[:-2], mat1.shape[-2], mat2.shape[-1]), dtype = mat1.dtype)
+                if mat1.dtype is torch.bfloat16:
+                    outdtype = mat2.dtype
+                else:
+                    outdtype = mat1.dtype
+                out = torch.empty((*mat1.shape[:-2], mat1.shape[-2], mat2.shape[-1]), dtype = outdtype)
 
             ## numpy matmul does not crash.  bfloat16 needs an additional package. ##
-            if mat1.dtype is torch.bfloat16:
-                npmat1, npmat2, npout = npbfloat16(mat1), npbfloat16(mat2), npbfloat16(out)
+            npmat1, npmat2, npout = t2np(mat1), t2np(mat2), t2np(out)
+            if out.dtype is torch.bfloat16:
                 npout[:] = np.matmul(npmat1, npmat2)
             else:
-                npmat1, npmat2, npout = mat1.numpy(), mat2.numpy(), out.numpy()
                 np.matmul(npmat1, npmat2, out=npout)
             out *= alpha
             return out
@@ -118,7 +134,7 @@ if (
             #).sum(axis=2) # construct smaller thing
             #return out
 
-    @patch(torch, aliases='matmual')
+    @patch(torch, aliases='matmul')
     def mm(mat1, mat2, *, out=None):
         return mm_impl.apply(mat1, mat2, out)
     
