@@ -69,9 +69,9 @@ if (
     class mm_impl(torch.autograd.Function):
         @staticmethod
         def backward(ctx, grad_output):
-            mat1, mat2, alpha = ctx.saved_tensors
+            mat1, mat2, alpha, shapes = ctx.saved_tensors
             alpha_conj = alpha.conj()
-            mat1_needs_grad, mat2_needs_grad, _, _ = ctx.needs_input_grad
+            mat1_needs_grad, mat2_needs_grad, *_ = ctx.needs_input_grad
             mat1_grad, mat2_grad = None, None
             if grad_output is not None:
                 #if mat1.dtype is torch.bfloat16:
@@ -82,14 +82,14 @@ if (
                 #    grad_output = grad_output.to(torch.float64)
                 # ported from torch/csrc/autograd: FunctionsManual.cpp and generated/Functions.cpp
                 if mat1_needs_grad:
-                    mat1_grad = mm(grad_output, mat2.T.conj()) * alpha_conj
+                    mat1_grad = mm(grad_output, mat2.transpose(-1,-2).conj()) * alpha_conj
                 if mat2_needs_grad:
-                    mat2_grad = mm(mat1.T.conj(), grad_output) * alpha_conj
+                    mat2_grad = mm(mat1.transpose(-1,-2).conj(), grad_output) * alpha_conj
             return mat1_grad, mat2_grad, None, None
         @staticmethod
         #@torch.autograd.function.once_differentiable
         def forward(ctx, mat1, mat2, out = None, alpha = torch.tensor(1)):
-            ctx.save_for_backward(mat1, mat2, alpha)
+            ctx.save_for_backward(mat1, mat2, alpha, torch.tensor([mat1.shape, mat2.shape]))
             ctx.set_materialize_grads(False)
 
 
