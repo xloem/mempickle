@@ -9,6 +9,8 @@ import mmap
 WEIGHTS_NAME = transformers.file_utils.WEIGHTS_NAME
 PTMAP_WEIGHTS_NAME = WEIGHTS_NAME.replace('.bin', '.ptmap')
 
+OFFLINE_MODE_NAME = [attr_name for attr_name in ('_is_offline_mode', 'is_offline_mode') if hasattr(transformers.file_utils, attr_name)][0]
+
 class PyTorchMap:
     def __init__(self, filename = PTMAP_WEIGHTS_NAME):
         self.filename = filename
@@ -94,9 +96,9 @@ class Ctx:
         self.offline = offline
         self.read_kwparams = read_kwparams
     def __enter__(self):
-        self._transformers_offline = transformers.file_utils._is_offline_mode
+        self._transformers_offline = getattr(transformers.file_utils, OFFLINE_MODE_NAME)
         if self.offline is not None:
-            transformers.file_utils._is_offline_mode = self.offline
+            setattr(transformers.file_utils, OFFLINE_MODE_NAME, self.offline)
         transformers.file_utils.WEIGHTS_NAME = PTMAP_WEIGHTS_NAME
         PyTorchMap._cache = {}
         self._torch_load = torch.load
@@ -122,7 +124,7 @@ class Ctx:
         transformers.pipeline= self._pipeline
         torch.load = self._torch_load
         transformers.file_utils.WEIGHTS_NAME = WEIGHTS_NAME
-        transformers.file_utils._is_offline_mode = self._transformers_offline
+        setattr(transformers.file_utils, OFFLINE_MODE_NAME, self._transformers_offline)
 
 
 if __name__ == '__main__':
