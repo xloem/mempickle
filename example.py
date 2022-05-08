@@ -6,7 +6,7 @@ import pytorch_tensormap
 
 ### load pipeline with ptmap files ###
 # unfortunately this context manager presently hacks the inside of transformers and may fail on other versions.
-with pytorch_tensormap.Ctx(offline = False, writeable = True):
+with pytorch_tensormap.Ctx(offline = False, writeable = True, add_prefix = 'transformer.'):
     gpt2 = transformers.pipeline('text-generation', model = 'baffo32/gpt2-ptmap')
 
 
